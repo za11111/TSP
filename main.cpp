@@ -319,18 +319,18 @@ public:
         cout << "最优路径长度: " << fixed << setprecision(2) << totalDistance << endl;
         cout << "最优路径: ";
         for (int i = 0; i < min(10, n); i++) {
-            cout << solution[i] << " -> ";
+            cout << solution[i]+1 << " -> ";
         }
-        if (n > 10) cout << "... -> " << solution[0];
-        else cout << solution[0];
+        if (n > 10) cout << "... -> " << solution[0]+1;
+        else cout << solution[0]+1;
         cout << endl;
         
         // 验证路径
         cout << "\n路径验证:" << endl;
         for (int i = 0; i < n - 1; i++) {
-            cout << solution[i] << " -> ";
+            cout << solution[i]+1 << " -> ";
         }
-        cout << solution[n - 1] << " -> " << solution[0] << endl;
+        cout << solution[n - 1]+1 << " -> " << solution[0]+1 << endl;
     }
 };
 
@@ -357,9 +357,9 @@ int main() {
     cout << "\n选择测试方式:" << endl;
     cout << "1. 使用预定义示例数据（16个城市）" << endl;
     cout << "2. 随机生成数据" << endl;
-    cout << "请输入选择 (1-2): ";
-    cin >> choice;
-    
+    cout << "3. 使用输入文件数据" << endl;
+    cout << "请输入选择 (1-3): ";
+    cin >> choice;  
     vector<pair<double, double>> cities;
     
     if (choice == 1) {
@@ -371,12 +371,26 @@ int main() {
             {120, 80}, {180, 60}, {20, 40}, {100, 40}
         };
         cout << "使用预定义16城市数据" << endl;
-    } else {
+    } else if(choice == 2){
         int n;
         cout << "请输入城市数量: ";
         cin >> n;
         cities = generateRandomCities(n);
         cout << "生成了 " << n << " 个随机城市" << endl;
+    }
+    else if(choice == 3)
+    {
+        cout<<"使用输入文件数据"<<endl;
+        int index;
+        double x,y;
+        while(cin>>index>>x>>y)
+        {
+            cities.push_back({x,y});
+        }
+    }
+    else{
+        cout<<"错误的选项";
+        return 0;
     }
     
     // 创建TSP问题实例
