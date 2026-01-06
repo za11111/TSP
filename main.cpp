@@ -1,411 +1,202 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <string>
+#include <fstream>
+#include <sstream>
 #include <algorithm>
+#include <limits>
 #include <random>
-#include <ctime>
-#include <climits>
 #include <iomanip>
-#include <queue>
+#include <chrono>
+#include <cstdlib>
 
 using namespace std;
 
-// 禁忌表项结构
-struct TabuMove {
-    int i;      // 城市i
-    int j;      // 城市j
-    int tenure; // 禁忌长度（剩余禁忌期）
-    
-    TabuMove(int _i, int _j, int _tenure) : i(_i), j(_j), tenure(_tenure) {}
+struct City {
+    int id;
+    double x;
+    double y;
 };
 
-// 旅行商问题类
-class TSP {
+// 经过优化的全局配置
+struct TabuConfig {
+    int max_iterations;    // 总迭代次数
+    int tabu_tenure;       // 动态禁忌长度
+    int max_idle;          // 允许的最大停滞次数（跳出局部最优的关键）
+
+    TabuConfig(int n) {
+        // 根据城市数量 n 动态调整参数
+        max_iterations = 200000;             // 增加迭代次数
+        tabu_tenure = (int)(n * 0.2);       // 禁忌长度取 20%
+        if (tabu_tenure < 15) tabu_tenure = 15;
+        max_idle = 5000;                    // 连续max_idle次没进步则触发重置
+    }
+};
+
+class TSPSolver {
 private:
-    int n; // 城市数量
-    vector<pair<double, double>> cities; // 城市坐标
-    vector<vector<double>> distance;    // 距离矩阵
-    
-    // 禁忌表
-    vector<vector<int>> tabuTable;
-    
-    // 禁忌搜索参数
-    int tabuTenure;      // 禁忌长度
-    int maxIterations;   // 最大迭代次数
-    int maxNoImprove;    // 最大无改进迭代次数
-    
+    vector<City> cities;
+    vector<vector<double>> distMatrix;
+    int numCities;
+    vector<vector<int>> tabuList;
+
 public:
-    TSP(const vector<pair<double, double>>& _cities) 
-        : cities(_cities), n(_cities.size()) {
-        
-        // 初始化距离矩阵
-        distance.resize(n, vector<double>(n, 0));
-        for (int i = 0; i < n; i++) {
-            for (int j = i + 1; j < n; j++) {
-                double dx = cities[i].first - cities[j].first;
-                double dy = cities[i].second - cities[j].second;
-                distance[i][j] = distance[j][i] = sqrt(dx * dx + dy * dy);
+    TSPSolver() : numCities(0) {}
+
+    double calcDistance(const City& c1, const City& c2) {
+        double dx = c1.x - c2.x;
+        double dy = c1.y - c2.y;
+        return std::sqrt(dx * dx + dy * dy);
+    }
+
+    bool loadTSPFile(const string& filename) {
+        ifstream file(filename);
+        if (!file.is_open()) {
+            cerr << "错误: 无法打开文件 " << filename << endl;
+            return false;
+        }
+
+        string line;
+        bool coordSection = false;
+        cities.clear();
+        while (getline(file, line)) {
+            if (line.empty()) continue;
+            if (line.find("NODE_COORD_SECTION") != string::npos) {
+                coordSection = true;
+                continue;
+            }
+            if (line.find("EOF") != string::npos) break;
+            if (coordSection) {
+                stringstream ss(line);
+                int id; double x, y;
+                if (ss >> id >> x >> y) cities.push_back({id, x, y});
             }
         }
-        
-        // 初始化禁忌表
-        tabuTable.resize(n, vector<int>(n, 0));
-        
-        // 设置默认参数
-        tabuTenure = 10 + n / 5;    // 禁忌长度与问题规模相关
-        maxIterations = 1000 * n;
-        maxNoImprove = 100 * n;
-    }
-    
-    // 计算路径总长度
-    double calculateTotalDistance(const vector<int>& path) {
-        double total = 0;
-        for (int i = 0; i < n - 1; i++) {
-            total += distance[path[i]][path[i + 1]];
-        }
-        total += distance[path[n - 1]][path[0]]; // 回到起点
-        return total;
-    }
-    
-    // 生成初始解（使用最近邻法）
-    vector<int> generateInitialSolution() {
-        vector<int> path(n);
-        vector<bool> visited(n, false);
-        
-        // 随机选择起点
-        random_device rd;
-        mt19937 gen(rd());
-        uniform_int_distribution<> dis(0, n - 1);
-        int start = dis(gen);
-        
-        path[0] = start;
-        visited[start] = true;
-        
-        // 最近邻法构建路径
-        for (int i = 1; i < n; i++) {
-            int current = path[i - 1];
-            int nextCity = -1;
-            double minDist = INFINITY;
-            
-            for (int j = 0; j < n; j++) {
-                if (!visited[j] && distance[current][j] < minDist) {
-                    minDist = distance[current][j];
-                    nextCity = j;
-                }
+
+        numCities = cities.size();
+        if (numCities == 0) return false;
+
+        distMatrix.assign(numCities, vector<double>(numCities));
+        for (int i = 0; i < numCities; ++i) {
+            for (int j = 0; j < numCities; ++j) {
+                distMatrix[i][j] = calcDistance(cities[i], cities[j]);
             }
-            
-            path[i] = nextCity;
-            visited[nextCity] = true;
         }
-        
-        return path;
+        cout << "成功加载 " << numCities << " 个城市。" << endl;
+        return true;
     }
-    
-    // 2-opt邻域操作
-    double perform2OptMove(vector<int>& path, int i, int j) {
-        // 计算当前边的长度
-        int n = path.size();
-        int i_prev = (i - 1 + n) % n;
-        int j_next = (j + 1) % n;
-        
-        double oldDistance = distance[path[i_prev]][path[i]] + distance[path[j]][path[j_next]];
-        double newDistance = distance[path[i_prev]][path[j]] + distance[path[i]][path[j_next]];
-        
-        // 如果新距离更短，执行交换
-        if (newDistance < oldDistance) {
-            // 反转i到j之间的路径段
-            while (i < j) {
-                swap(path[i], path[j]);
-                i++;
-                j--;
-            }
-            return newDistance - oldDistance;
-        }
-        
-        return 0; // 没有改进
+
+    double getPathLength(const vector<int>& path) {
+        double length = 0.0;
+        for (int i = 0; i < numCities - 1; ++i) length += distMatrix[path[i]][path[i+1]];
+        length += distMatrix[path[numCities-1]][path[0]];
+        return length;
     }
-    
-    // 交换两个城市的位置
-    double performSwapMove(vector<int>& path, int i, int j) {
-        if (i == j) return 0;
-        
-        int n = path.size();
-        int i_prev = (i - 1 + n) % n;
-        int i_next = (i + 1) % n;
-        int j_prev = (j - 1 + n) % n;
-        int j_next = (j + 1) % n;
-        
-        // 处理相邻城市的情况
-        if ((i + 1) % n == j) {
-            // i和j相邻，且j在i后面
-            double oldDist = distance[path[i_prev]][path[i]] + 
-                           distance[path[i]][path[j]] + 
-                           distance[path[j]][path[j_next]];
-            double newDist = distance[path[i_prev]][path[j]] + 
-                           distance[path[j]][path[i]] + 
-                           distance[path[i]][path[j_next]];
+
+    // 扰动函数：用于跳出局部最优。它通过随机交换路径中的节点并清空禁忌表，将搜索过程强行“推”到一个新的区域重新开始。
+    void perturbSolution(vector<int>& path) {
+        static mt19937 rng(time(0));
+        for (int k = 0; k < 3; ++k) { // 随机交换3次
+            int i = rng() % numCities;
+            int j = rng() % numCities;
             swap(path[i], path[j]);
-            return newDist - oldDist;
-        }
-        else if ((j + 1) % n == i) {
-            // j和i相邻，且i在j后面
-            double oldDist = distance[path[j_prev]][path[j]] + 
-                           distance[path[j]][path[i]] + 
-                           distance[path[i]][path[i_next]];
-            double newDist = distance[path[j_prev]][path[i]] + 
-                           distance[path[i]][path[j]] + 
-                           distance[path[j]][path[i_next]];
-            swap(path[i], path[j]);
-            return newDist - oldDist;
-        }
-        else {
-            // i和j不相邻
-            double oldDist = distance[path[i_prev]][path[i]] + 
-                           distance[path[i]][path[i_next]] + 
-                           distance[path[j_prev]][path[j]] + 
-                           distance[path[j]][path[j_next]];
-            double newDist = distance[path[i_prev]][path[j]] + 
-                           distance[path[j]][path[i_next]] + 
-                           distance[path[j_prev]][path[i]] + 
-                           distance[path[i]][path[j_next]];
-            swap(path[i], path[j]);
-            return newDist - oldDist;
         }
     }
-    
-    // 更新禁忌表
-    void updateTabuTable(int i, int j) {
-        // 减少所有表项的禁忌期
-        for (auto& row : tabuTable) {
-            for (auto& tenure : row) {
-                if (tenure > 0) tenure--;
-            }
-        }
-        
-        // 设置新的禁忌表项
-        tabuTable[i][j] = tabuTenure;
-        tabuTable[j][i] = tabuTenure;
-    }
-    
-    // 检查移动是否在禁忌表中
-    bool isTabu(int i, int j) {
-        return tabuTable[i][j] > 0 || tabuTable[j][i] > 0;
-    }
-    
-    // 禁忌搜索主函数
-    vector<int> tabuSearch() {
-        // 生成初始解
-        vector<int> currentSolution = generateInitialSolution();
-        vector<int> bestSolution = currentSolution;
-        
-        double currentDistance = calculateTotalDistance(currentSolution);
-        double bestDistance = currentDistance;
-        
-        cout << "初始解长度: " << fixed << setprecision(2) << bestDistance << endl;
-        
-        int noImproveCount = 0;
-        random_device rd;
-        mt19937 gen(rd());
-        uniform_real_distribution<> dis(0.0, 1.0);
-        
-        // 主迭代循环
-        for (int iter = 0; iter < maxIterations; iter++) {
-            if (noImproveCount >= maxNoImprove) {
-                cout << "达到最大无改进次数，提前终止" << endl;
-                break;
-            }
-            
-            double bestNeighborImprovement = 0;
-            int bestI = -1, bestJ = -1;
-            bool isAspiration = false;
-            
-            // 搜索邻域
-            for (int i = 0; i < n; i++) {
-                for (int j = i + 1; j < n; j++) {
-                    // 复制当前解进行测试
-                    vector<int> neighborSolution = currentSolution;
-                    
-                    // 执行移动并计算改进
-                    double improvement = performSwapMove(neighborSolution, i, j);
-                    
-                    // 检查是否为最佳邻域解
-                    if (improvement < bestNeighborImprovement) {
-                        // 如果不在禁忌表中或满足藐视准则
-                        if (!isTabu(i, j) || 
-                            (calculateTotalDistance(neighborSolution) < bestDistance)) {
-                            
-                            bestNeighborImprovement = improvement;
-                            bestI = i;
-                            bestJ = j;
-                            
-                            // 检查是否满足藐视准则（找到新的全局最优解）
-                            if (calculateTotalDistance(neighborSolution) < bestDistance) {
-                                isAspiration = true;
-                            }
-                        }
+
+    void runTabuSearch(TabuConfig config) {
+        if (numCities < 3) return;
+        auto startTime = chrono::high_resolution_clock::now();
+
+        vector<int> currentSol(numCities);
+        for(int i=0; i<numCities; ++i) currentSol[i] = i;
+        shuffle(currentSol.begin(), currentSol.end(), mt19937(random_device()()));
+
+        double currentCost = getPathLength(currentSol);
+        vector<int> bestSol = currentSol;
+        double bestCost = currentCost;
+
+        tabuList.assign(numCities, vector<int>(numCities, 0));
+        int idleCounter = 0;
+
+        cout << "初始路径长度: " << currentCost << endl;
+        cout << "开始全局增强型禁忌搜索..." << endl;
+
+        for (int iter = 0; iter < config.max_iterations; ++iter) {
+            double bestNeighborCost = numeric_limits<double>::max();
+            int best_i = -1, best_j = -1;
+
+            // --- 全邻域遍历 2-Opt ---
+            for (int i = 0; i < numCities - 1; ++i) {
+                for (int j = i + 1; j < numCities; ++j) {
+                    if (i == 0 && j == numCities - 1) continue;
+
+                    // 计算增量 (Delta Evaluation)
+                    int idx_p = (i - 1 + numCities) % numCities;
+                    int idx_n = (j + 1) % numCities;
+                    double delta = (distMatrix[currentSol[idx_p]][currentSol[j]] + distMatrix[currentSol[i]][currentSol[idx_n]]) -
+                                   (distMatrix[currentSol[idx_p]][currentSol[i]] + distMatrix[currentSol[j]][currentSol[idx_n]]);
+
+                    double neighborCost = currentCost + delta;
+
+                    int u_t = min(currentSol[i], currentSol[j]);
+                    int v_t = max(currentSol[i], currentSol[j]);
+
+                    bool isTabu = (tabuList[u_t][v_t] > iter);
+                    // 特赦准则
+                    if (isTabu && neighborCost < bestCost) isTabu = false;
+
+                    if (!isTabu && neighborCost < bestNeighborCost) {
+                        bestNeighborCost = neighborCost;
+                        best_i = i;
+                        best_j = j;
                     }
                 }
             }
-            
-            // 如果找到改进的移动
-            if (bestI != -1 && bestJ != -1) {
-                // 执行最佳移动
-                performSwapMove(currentSolution, bestI, bestJ);
-                currentDistance += bestNeighborImprovement;
-                
-                // 更新禁忌表
-                if (!isAspiration) {
-                    updateTabuTable(bestI, bestJ);
-                }
-                
-                // 更新全局最优解
-                if (currentDistance < bestDistance) {
-                    bestSolution = currentSolution;
-                    bestDistance = currentDistance;
-                    noImproveCount = 0;
-                    
-                    if (iter % 100 == 0) {
-                        cout << "迭代 " << iter << ": 新最优解长度 = " 
-                             << fixed << setprecision(2) << bestDistance << endl;
-                    }
+
+            if (best_i != -1) {
+                reverse(currentSol.begin() + best_i, currentSol.begin() + best_j + 1);
+                currentCost = bestNeighborCost;
+
+                if (currentCost < bestCost - 0.001) {
+                    bestCost = currentCost;
+                    bestSol = currentSol;
+                    idleCounter = 0; // 重置停滞计数
+                    cout << "迭代 " << iter << ": 发现新全局最优 = " << bestCost << endl;
                 } else {
-                    noImproveCount++;
+                    idleCounter++;
                 }
-            } else {
-                // 如果没有找到改进，随机选择一个非禁忌移动
-                bool found = false;
-                for (int attempt = 0; attempt < 100 && !found; attempt++) {
-                    int i = gen() % n;
-                    int j = gen() % n;
-                    if (i != j && !isTabu(i, j)) {
-                        performSwapMove(currentSolution, i, j);
-                        currentDistance = calculateTotalDistance(currentSolution);
-                        updateTabuTable(i, j);
-                        found = true;
-                    }
-                }
-                
-                if (!found) {
-                    // 如果找不到非禁忌移动，随机移动
-                    int i = gen() % n;
-                    int j = gen() % n;
-                    while (i == j) j = gen() % n;
-                    performSwapMove(currentSolution, i, j);
-                    currentDistance = calculateTotalDistance(currentSolution);
-                    updateTabuTable(i, j);
-                }
-                
-                noImproveCount++;
+
+                // 更新禁忌表
+                tabuList[min(currentSol[best_i], currentSol[best_j])][max(currentSol[best_i], currentSol[best_j])] = iter + config.tabu_tenure;
             }
-            
-            // 动态调整禁忌长度
-            if (iter % 50 == 0) {
-                if (noImproveCount > 50) {
-                    tabuTenure = min(tabuTenure + 1, 20 + n / 3);
-                } else if (noImproveCount < 10) {
-                    tabuTenure = max(tabuTenure - 1, 5);
-                }
+
+            // --- 跳出局部最优：重启策略 ---
+            if (idleCounter > config.max_idle) {
+                cout << "迭代 " << iter << ": 搜索停滞，执行扰动以跳出局部最优..." << endl;
+                perturbSolution(currentSol);
+                currentCost = getPathLength(currentSol);
+                idleCounter = 0;
+                // 清空部分禁忌表以增加灵活性
+                tabuList.assign(numCities, vector<int>(numCities, 0));
             }
         }
-        
-        return bestSolution;
-    }
-    
-    // 输出结果
-    void printSolution(const vector<int>& solution) {
-        double totalDistance = calculateTotalDistance(solution);
-        
-        cout << "\n===== 禁忌搜索算法结果 =====" << endl;
-        cout << "最优路径长度: " << fixed << setprecision(2) << totalDistance << endl;
-        cout << "最优路径: ";
-        for (int i = 0; i < min(10, n); i++) {
-            cout << solution[i]+1 << " -> ";
-        }
-        if (n > 10) cout << "... -> " << solution[0]+1;
-        else cout << solution[0]+1;
-        cout << endl;
-        
-        // 验证路径
-        cout << "\n路径验证:" << endl;
-        for (int i = 0; i < n - 1; i++) {
-            cout << solution[i]+1 << " -> ";
-        }
-        cout << solution[n - 1]+1 << " -> " << solution[0]+1 << endl;
+
+        auto endTime = chrono::high_resolution_clock::now();
+        cout << "\n---------------------------------" << endl;
+        cout << "总时长: " << chrono::duration<double>(endTime - startTime).count() << " 秒" << endl;
+        cout << "最终最优成本: " << bestCost << endl;
     }
 };
 
-// 生成随机测试数据
-vector<pair<double, double>> generateRandomCities(int n, double maxX = 100, double maxY = 100) {
-    vector<pair<double, double>> cities;
-    random_device rd;
-    mt19937 gen(rd());
-    uniform_real_distribution<> disX(0, maxX);
-    uniform_real_distribution<> disY(0, maxY);
-    
-    for (int i = 0; i < n; i++) {
-        cities.emplace_back(disX(gen), disY(gen));
+int main(int argc, char* argv[]) {
+    system("chcp 65001");
+    string filename = (argc > 1) ? argv[1] : "a280.tsp";
+    TSPSolver solver;
+    if (solver.loadTSPFile(filename)) {
+        // 使用针对全局最优改进的配置
+        TabuConfig config(280);
+        solver.runTabuSearch(config);
     }
-    
-    return cities;
-}
-
-int main() {
-    cout << "=== TSP问题禁忌搜索算法求解 ===" << endl;
-    
-    // 示例：使用预定义城市坐标或随机生成
-    int choice;
-    cout << "\n选择测试方式:" << endl;
-    cout << "1. 使用预定义示例数据（16个城市）" << endl;
-    cout << "2. 随机生成数据" << endl;
-    cout << "3. 使用输入文件数据" << endl;
-    cout << "请输入选择 (1-3): ";
-    cin >> choice;  
-    vector<pair<double, double>> cities;
-    
-    if (choice == 1) {
-        // 预定义示例数据
-        cities = {
-            {60, 200}, {180, 200}, {80, 180}, {140, 180},
-            {20, 160}, {100, 160}, {200, 160}, {140, 140},
-            {40, 120}, {100, 120}, {180, 100}, {60, 80},
-            {120, 80}, {180, 60}, {20, 40}, {100, 40}
-        };
-        cout << "使用预定义16城市数据" << endl;
-    } else if(choice == 2){
-        int n;
-        cout << "请输入城市数量: ";
-        cin >> n;
-        cities = generateRandomCities(n);
-        cout << "生成了 " << n << " 个随机城市" << endl;
-    }
-    else if(choice == 3)
-    {
-        cout<<"使用输入文件数据"<<endl;
-        int index;
-        double x,y;
-        while(cin>>index>>x>>y)
-        {
-            cities.push_back({x,y});
-        }
-    }
-    else{
-        cout<<"错误的选项";
-        return 0;
-    }
-    
-    // 创建TSP问题实例
-    TSP tsp(cities);
-    
-    // 运行禁忌搜索算法
-    clock_t start = clock();
-    vector<int> bestSolution = tsp.tabuSearch();
-    clock_t end = clock();
-    
-    // 输出结果
-    tsp.printSolution(bestSolution);
-    
-    double runtime = double(end - start) / CLOCKS_PER_SEC;
-    cout << "\n计算时间: " << fixed << setprecision(2) << runtime << " 秒" << endl;
-    
     return 0;
 }
